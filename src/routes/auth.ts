@@ -5,8 +5,10 @@ import {
   RefreshTokenRequest,
   LogoutRequest,
   AuthUser,
-  UpdateUserRequest
+  UpdateUserRequest,
+  DeleteAccountRequest
 } from '../types';
+import { logError, logInfo, logWarn } from '../config/logger';
 
 const router: Router = express.Router();
 
@@ -115,6 +117,10 @@ router.post('/login', (req: any, res: any) => {
     const token: string = `mock_token_${user.id}_${Date.now()}`;
     const refreshToken: string = `mock_refresh_token_${user.id}_${Date.now()}`;
 
+    // 定义过期时间（秒）
+    const tokenExpiresIn = 60 * 60; // 1小时
+    const refreshTokenExpiresIn = 7 * 24 * 60 * 60; // 7天
+
     // 存储refresh token
     refreshTokenStore.set(refreshToken, {
       userId: user.id,
@@ -133,7 +139,9 @@ router.post('/login', (req: any, res: any) => {
       data: {
         user: authUser,
         token,
-        refreshToken
+        refreshToken,
+        expiresIn: tokenExpiresIn,
+        refreshExpiresIn: refreshTokenExpiresIn
       },
       message: 'Login successful'
     });
@@ -183,8 +191,24 @@ router.post('/register', (req: any, res: any) => {
   try {
     const { name, email, password, confirm_password }: RegisterRequest = req.body;
 
+    logInfo('Registration attempt', {
+      email,
+      hasName: !!name,
+      ip: req.ip,
+      userAgent: req.get('User-Agent')
+    });
+
     // 验证必填字段
     if (!email || !password || !confirm_password) {
+      logWarn('Registration failed: Missing required fields', {
+        email,
+        missingFields: {
+          email: !email,
+          password: !password,
+          confirm_password: !confirm_password
+        },
+        ip: req.ip
+      });
       return res.status(400).json({
         success: false,
         error: 'Email, password and confirm_password are required'
@@ -196,6 +220,7 @@ router.post('/register', (req: any, res: any) => {
 
     // 验证密码确认
     if (password !== confirm_password) {
+      logWarn('Registration failed: Password mismatch', { email, ip: req.ip });
       return res.status(400).json({
         success: false,
         error: 'Password and confirm_password do not match'
@@ -204,6 +229,11 @@ router.post('/register', (req: any, res: any) => {
 
     // 验证密码长度
     if (password.length < 6) {
+      logWarn('Registration failed: Password too short', {
+        email,
+        passwordLength: password.length,
+        ip: req.ip
+      });
       return res.status(400).json({
         success: false,
         error: 'Password must be at least 6 characters long'
@@ -213,6 +243,7 @@ router.post('/register', (req: any, res: any) => {
     // 检查邮箱是否已存在
     const existingUser: DatabaseUser | undefined = users.find(u => u.email === email);
     if (existingUser) {
+      logWarn('Registration failed: Email already exists', { email, ip: req.ip });
       return res.status(400).json({
         success: false,
         error: 'Email already registered'
@@ -234,6 +265,10 @@ router.post('/register', (req: any, res: any) => {
     const token: string = `mock_token_${newUser.id}_${Date.now()}`;
     const refreshToken: string = `mock_refresh_token_${newUser.id}_${Date.now()}`;
 
+    // 定义过期时间（秒）
+    const tokenExpiresIn = 60 * 60; // 1小时
+    const refreshTokenExpiresIn = 7 * 24 * 60 * 60; // 7天
+
     // 存储refresh token
     refreshTokenStore.set(refreshToken, {
       userId: newUser.id,
@@ -247,16 +282,34 @@ router.post('/register', (req: any, res: any) => {
       avatar: newUser.avatar
     };
 
+    logInfo('User registered successfully', {
+      userId: newUser.id,
+      email: newUser.email,
+      name: newUser.name,
+      generatedUsername: userName,
+      ip: req.ip,
+      userAgent: req.get('User-Agent')
+    });
+
     res.status(201).json({
       success: true,
       data: {
         user: authUser,
         token,
-        refreshToken
+        refreshToken,
+        expiresIn: tokenExpiresIn,
+        refreshExpiresIn: refreshTokenExpiresIn
       },
       message: 'Registration successful'
     });
   } catch (error) {
+    logError('Registration error', error, {
+      email: req.body?.email,
+      ip: req.ip,
+      userAgent: req.get('User-Agent'),
+      requestBody: JSON.stringify(req.body).replace(/"password":"[^"]*"/g, '"password":"***"')
+    });
+
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     res.status(500).json({
       success: false,
@@ -572,6 +625,10 @@ router.post('/refresh-token', (req: any, res: any) => {
     const newToken = `mock_token_${user.id}_${Date.now()}`;
     const newRefreshToken = `mock_refresh_token_${user.id}_${Date.now()}`;
 
+    // 定义过期时间（秒）
+    const tokenExpiresIn = 60 * 60; // 1小时
+    const refreshTokenExpiresIn = 7 * 24 * 60 * 60; // 7天
+
     // 删除旧的refresh token，存储新的
     refreshTokenStore.delete(refreshToken);
     refreshTokenStore.set(newRefreshToken, {
@@ -583,7 +640,9 @@ router.post('/refresh-token', (req: any, res: any) => {
       success: true,
       data: {
         token: newToken,
-        refreshToken: newRefreshToken
+        refreshToken: newRefreshToken,
+        expiresIn: tokenExpiresIn,
+        refreshExpiresIn: refreshTokenExpiresIn
       },
       message: 'Token refreshed successfully'
     });
@@ -668,6 +727,197 @@ router.post('/logout', (req: any, res: any) => {
       message: 'Logout successful'
     });
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({
+      success: false,
+      error: errorMessage
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/auth/delete-account:
+ *   delete:
+ *     summary: 注销账号
+ *     description: 永久删除用户账号及相关数据。此操作不可逆，主要用于e2e测试中清理测试数据。
+ *     tags: [Auth]
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/DeleteAccountRequest'
+ *     responses:
+ *       200:
+ *         description: 账号删除成功
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: 'Account deleted successfully'
+ *       400:
+ *         description: 请求参数错误
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: 未授权或密码错误
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       403:
+ *         description: 无法删除默认账号
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       500:
+ *         description: 服务器内部错误
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.delete('/delete-account', (req: any, res: any) => {
+  try {
+    // 模拟从token中获取用户信息
+    const token: string | undefined = req.headers.authorization?.replace('Bearer ', '');
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: 'Access token required'
+      });
+    }
+
+    // 检查token是否在黑名单中
+    if (tokenBlacklist.has(token)) {
+      return res.status(401).json({
+        success: false,
+        error: 'Token has been revoked'
+      });
+    }
+
+    // 模拟验证token (实际项目中应该验证真实的JWT)
+    if (!token.startsWith('mock_token_')) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid token'
+      });
+    }
+
+    // 从token中提取用户ID (模拟)
+    const tokenParts: string[] = token.split('_');
+    const userId: number = parseInt(tokenParts[2], 10);
+    const userIndex: number = users.findIndex(u => u.id === userId);
+
+    if (userIndex === -1) {
+      return res.status(401).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    const user = users[userIndex];
+    const { password, confirmText }: DeleteAccountRequest = req.body;
+
+    // 验证必填字段
+    if (!password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Password is required to delete account'
+      });
+    }
+
+    // 验证密码
+    if (user.password !== password) {
+      logWarn('Account deletion failed: Invalid password', {
+        userId: user.id,
+        email: user.email,
+        ip: req.ip,
+        userAgent: req.get('User-Agent')
+      });
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid password'
+      });
+    }
+
+    // 可选：验证确认文本
+    if (confirmText && confirmText !== 'DELETE MY ACCOUNT') {
+      return res.status(400).json({
+        success: false,
+        error: 'Confirmation text must be "DELETE MY ACCOUNT"'
+      });
+    }
+
+    // 防止删除默认的测试账号（可选保护）
+    const protectedEmails = ['admin@example.com', 'user@example.com'];
+    if (protectedEmails.includes(user.email)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Cannot delete default test accounts'
+      });
+    }
+
+    // 记录删除操作
+    logInfo('Account deletion initiated', {
+      userId: user.id,
+      email: user.email,
+      name: user.name,
+      ip: req.ip,
+      userAgent: req.get('User-Agent')
+    });
+
+    // 删除用户相关的所有数据
+    // 1. 将当前token加入黑名单
+    tokenBlacklist.add(token);
+
+    // 2. 删除所有相关的refresh token
+    const tokensToDelete: string[] = [];
+    refreshTokenStore.forEach((tokenData, refreshToken) => {
+      if (tokenData.userId === userId) {
+        tokensToDelete.push(refreshToken);
+      }
+    });
+    tokensToDelete.forEach(refreshToken => {
+      refreshTokenStore.delete(refreshToken);
+    });
+
+    // 3. 从用户数组中删除用户
+    users.splice(userIndex, 1);
+
+    logInfo('Account deleted successfully', {
+      deletedUserId: userId,
+      deletedEmail: user.email,
+      deletedName: user.name,
+      remainingUsersCount: users.length,
+      ip: req.ip,
+      userAgent: req.get('User-Agent')
+    });
+
+    res.json({
+      success: true,
+      message: 'Account deleted successfully'
+    });
+  } catch (error) {
+    logError('Account deletion error', error, {
+      ip: req.ip,
+      userAgent: req.get('User-Agent'),
+      requestBody: JSON.stringify(req.body).replace(/"password":"[^"]*"/g, '"password":"***"')
+    });
+
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     res.status(500).json({
       success: false,

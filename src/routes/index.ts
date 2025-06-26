@@ -8,6 +8,7 @@ import authRoutes from './auth';
 import todoRoutes from './todos';
 import tagRoutes from './tags';
 import statsRoutes from './stats';
+import logsRoutes from './logs';
 
 // API 根路径
 router.get('/', (req: Request, res: Response) => {
@@ -31,7 +32,10 @@ router.get('/', (req: Request, res: Response) => {
       'GET /api/stats - 获取统计信息',
       'GET /api/stats/priority - 获取优先级统计',
       'GET /api/stats/timeline - 获取时间线统计',
-      'GET /api/stats/completion-rate - 获取完成率统计'
+      'GET /api/stats/completion-rate - 获取完成率统计',
+      'GET /api/logs - 获取日志文件列表',
+      'GET /api/logs/:filename - 获取日志文件内容',
+      'GET /api/logs/tail/:filename - 实时获取日志尾部内容'
     ]
   });
 });
@@ -42,5 +46,6 @@ router.use('/auth', authRoutes);
 router.use('/todos', todoRoutes);
 router.use('/tags', tagRoutes);
 router.use('/stats', statsRoutes);
+router.use('/logs', logsRoutes);
 
 export default router;

@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+import { Request } from 'express';
 
 // 用户相关类型
 export interface User {
@@ -47,6 +47,8 @@ export interface AuthResponse {
     user: AuthUser;
     token: string;
     refreshToken?: string;
+    expiresIn: number; // token过期时间（秒）
+    refreshExpiresIn?: number; // refresh token过期时间（秒）
   };
   message: string;
 }
@@ -60,6 +62,8 @@ export interface RefreshTokenResponse {
   data: {
     token: string;
     refreshToken: string;
+    expiresIn: number; // token过期时间（秒）
+    refreshExpiresIn: number; // refresh token过期时间（秒）
   };
   message: string;
 }
@@ -67,6 +71,11 @@ export interface RefreshTokenResponse {
 export interface LogoutRequest {
   token?: string;
   refreshToken?: string;
+}
+
+export interface DeleteAccountRequest {
+  password: string;
+  confirmText?: string; // 可选的确认文本，如 "DELETE MY ACCOUNT"
 }
 
 // API响应类型

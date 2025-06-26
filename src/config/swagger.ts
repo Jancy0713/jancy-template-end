@@ -353,6 +353,16 @@ const options: swaggerJsdoc.Options = {
                   type: 'string',
                   description: '刷新令牌',
                   example: 'mock_refresh_token_1_1640995200000'
+                },
+                expiresIn: {
+                  type: 'integer',
+                  description: 'token过期时间（秒）',
+                  example: 3600
+                },
+                refreshExpiresIn: {
+                  type: 'integer',
+                  description: 'refresh token过期时间（秒）',
+                  example: 604800
                 }
               }
             },
@@ -392,6 +402,16 @@ const options: swaggerJsdoc.Options = {
                   type: 'string',
                   description: '新的刷新令牌',
                   example: 'mock_refresh_token_1_1640995300000'
+                },
+                expiresIn: {
+                  type: 'integer',
+                  description: 'token过期时间（秒）',
+                  example: 3600
+                },
+                refreshExpiresIn: {
+                  type: 'integer',
+                  description: 'refresh token过期时间（秒）',
+                  example: 604800
                 }
               }
             },
@@ -413,6 +433,22 @@ const options: swaggerJsdoc.Options = {
               type: 'string',
               description: '刷新令牌（可选）',
               example: 'mock_refresh_token_1_1640995200000'
+            }
+          }
+        },
+        DeleteAccountRequest: {
+          type: 'object',
+          required: ['password'],
+          properties: {
+            password: {
+              type: 'string',
+              description: '用户密码（用于验证身份）',
+              example: 'user123'
+            },
+            confirmText: {
+              type: 'string',
+              description: '确认文本（可选），必须为 "DELETE MY ACCOUNT"',
+              example: 'DELETE MY ACCOUNT'
             }
           }
         },

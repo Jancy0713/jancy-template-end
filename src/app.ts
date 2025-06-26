@@ -1,12 +1,21 @@
 import express, { Application, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import morgan from 'morgan';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpecs from './config/swagger';
 import { config } from 'dotenv';
 import { HealthResponse } from './types';
 import routes from './routes';
+
+// 导入日志系统
+import logger, { logInfo, logError } from './config/logger';
+import {
+  httpLogger,
+  consoleHttpLogger,
+  errorLogger,
+  requestDetailLogger,
+  badRequestLogger
+} from './middleware/requestLogger';
 
 // 加载环境变量
 config();
@@ -38,7 +47,14 @@ app.use(cors({
   credentials: true
 }));
 
-app.use(morgan('combined')); // 日志记录
+// 日志中间件
+app.use(httpLogger); // 详细的HTTP日志记录到文件
+if (process.env.NODE_ENV !== 'production') {
+  app.use(consoleHttpLogger); // 开发环境控制台日志
+  app.use(requestDetailLogger); // 详细的请求调试日志
+}
+app.use(badRequestLogger); // 400错误专用日志
+
 app.use(express.json({ limit: '10mb' })); // 解析JSON请求体
 app.use(express.urlencoded({ extended: true })); // 解析URL编码请求体
 
@@ -150,11 +166,17 @@ app.use('*', (req: Request, res: Response) => {
 });
 
 // 全局错误处理
+app.use(errorLogger); // 错误日志记录
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
-  console.error(err.stack);
-  
+  logError('Unhandled error', err, {
+    method: req.method,
+    url: req.url,
+    ip: req.ip,
+    userAgent: req.get('User-Agent')
+  });
+
   const isDevelopment = process.env.NODE_ENV === 'development';
-  
+
   res.status(500).json({
     error: err.message || 'Internal Server Error',
     ...(isDevelopment && { stack: err.stack })
@@ -163,11 +185,25 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 
 // 启动服务器
 app.listen(PORT, '0.0.0.0', () => {
+  const startupInfo = {
+    port: PORT,
+    environment: process.env.NODE_ENV || 'development',
+    localUrl: `http://localhost:${PORT}`,
+    networkUrl: `http://192.168.50.79:${PORT}`,
+    docsUrl: `http://192.168.50.79:${PORT}/api-docs`,
+    logsDir: 'logs/',
+    timestamp: new Date().toISOString()
+  };
+
+  logInfo('🚀 Server started successfully', startupInfo);
+
+  // 控制台输出（保留用户友好的格式）
   console.log(`🚀 Server is running on port ${PORT}`);
   console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🌐 Local Access: http://localhost:${PORT}`);
   console.log(`🌐 Network Access: http://192.168.50.79:${PORT}`);
   console.log(`📚 API Documentation: http://192.168.50.79:${PORT}/api-docs`);
+  console.log(`📝 Logs Directory: logs/`);
 });
 
 export default app;
