@@ -1,52 +1,25 @@
 import express, { Router, Request, Response } from 'express';
 import { Tag, CreateTagData, UpdateTagData, ApiResponse } from '../types';
+import { TagRepository, DatabaseTag } from '../config/database';
 
 const router: Router = express.Router();
 
-// 模拟标签数据
-let tags: Tag[] = [
-  {
-    id: '1',
-    name: 'work',
-    color: '#409EFF',
-    createdAt: new Date('2025-06-20')
-  },
-  {
-    id: '2',
-    name: 'personal',
-    color: '#67C23A',
-    createdAt: new Date('2025-06-20')
-  },
-  {
-    id: '3',
-    name: 'learning',
-    color: '#E6A23C',
-    createdAt: new Date('2025-06-21')
-  },
-  {
-    id: '4',
-    name: 'health',
-    color: '#F56C6C',
-    createdAt: new Date('2025-06-22')
-  },
-  {
-    id: '5',
-    name: 'documentation',
-    color: '#909399',
-    createdAt: new Date('2025-06-23')
-  },
-  {
-    id: '6',
-    name: 'typescript',
-    color: '#3178C6',
-    createdAt: new Date('2025-06-24')
-  }
-];
+// 工具函数 - 将数据库标签转换为API标签格式
+function convertDatabaseTagToTag(dbTag: DatabaseTag): Tag {
+  return {
+    id: dbTag.id.toString(),
+    name: dbTag.name,
+    color: dbTag.color,
+    createdAt: new Date(dbTag.created_at)
+  };
+}
 
-let nextTagId = 7;
-
-// 工具函数
-const generateTagId = (): string => (nextTagId++).toString();
+// 模拟用户ID获取函数（实际项目中应该从认证中间件获取）
+function getCurrentUserId(req: any): number {
+  // 这里应该从JWT token或session中获取用户ID
+  // 为了演示，我们使用固定的用户ID
+  return 1;
+}
 
 /**
  * @swagger
@@ -74,8 +47,12 @@ const generateTagId = (): string => (nextTagId++).toString();
  *                   type: integer
  *                   example: 6
  */
-router.get('/', (req: any, res: any) => {
+router.get('/', async (req: any, res: any) => {
   try {
+    const userId = getCurrentUserId(req);
+    const dbTags = await TagRepository.findByUserId(userId);
+    const tags = dbTags.map(convertDatabaseTagToTag);
+
     res.json({
       success: true,
       data: tags,
@@ -120,18 +97,29 @@ router.get('/', (req: any, res: any) => {
  *       404:
  *         description: 标签不存在
  */
-router.get('/:id', (req: any, res: any) => {
+router.get('/:id', async (req: any, res: any) => {
   try {
     const { id } = req.params;
-    const tag = tags.find(t => t.id === id);
-    
-    if (!tag) {
+    const tagId = parseInt(id, 10);
+
+    if (isNaN(tagId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid tag ID'
+      });
+    }
+
+    const dbTag = await TagRepository.findById(tagId);
+
+    if (!dbTag) {
       return res.status(404).json({
         success: false,
         error: 'Tag not found'
       });
     }
-    
+
+    const tag = convertDatabaseTagToTag(dbTag);
+
     res.json({
       success: true,
       data: tag
@@ -174,42 +162,37 @@ router.get('/:id', (req: any, res: any) => {
  *       400:
  *         description: 请求参数错误
  */
-router.post('/', (req: any, res: any) => {
+router.post('/', async (req: any, res: any) => {
   try {
+    const userId = getCurrentUserId(req);
     const { name, color }: CreateTagData = req.body;
-    
+
     if (!name || name.trim() === '') {
       return res.status(400).json({
         success: false,
         error: 'Tag name is required'
       });
     }
-    
+
     if (!color || color.trim() === '') {
       return res.status(400).json({
         success: false,
         error: 'Tag color is required'
       });
     }
-    
+
     // 检查标签名是否已存在
-    const existingTag = tags.find(t => t.name.toLowerCase() === name.trim().toLowerCase());
+    const existingTag = await TagRepository.findByNameAndUserId(name.trim(), userId);
     if (existingTag) {
       return res.status(400).json({
         success: false,
         error: 'Tag name already exists'
       });
     }
-    
-    const newTag: Tag = {
-      id: generateTagId(),
-      name: name.trim(),
-      color: color.trim(),
-      createdAt: new Date()
-    };
-    
-    tags.push(newTag);
-    
+
+    const dbTag = await TagRepository.create(name.trim(), color.trim(), userId);
+    const newTag = convertDatabaseTagToTag(dbTag);
+
     res.status(201).json({
       success: true,
       data: newTag,
@@ -262,22 +245,29 @@ router.post('/', (req: any, res: any) => {
  *       400:
  *         description: 请求参数错误
  */
-router.put('/:id', (req: any, res: any) => {
+router.put('/:id', async (req: any, res: any) => {
   try {
+    const userId = getCurrentUserId(req);
     const { id } = req.params;
     const updateData: UpdateTagData = req.body;
+    const tagId = parseInt(id, 10);
 
-    const tagIndex = tags.findIndex(t => t.id === id);
-    if (tagIndex === -1) {
+    if (isNaN(tagId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid tag ID'
+      });
+    }
+
+    const existingTag = await TagRepository.findById(tagId);
+    if (!existingTag) {
       return res.status(404).json({
         success: false,
         error: 'Tag not found'
       });
     }
 
-    const tag = tags[tagIndex];
-
-    // 更新名称
+    // 验证更新数据
     if (updateData.name !== undefined) {
       if (updateData.name.trim() === '') {
         return res.status(400).json({
@@ -287,31 +277,37 @@ router.put('/:id', (req: any, res: any) => {
       }
 
       // 检查名称是否与其他标签重复
-      const existingTag = tags.find(t =>
-        t.id !== id && t.name.toLowerCase() === updateData.name!.trim().toLowerCase()
-      );
-      if (existingTag) {
+      const duplicateTag = await TagRepository.findByNameAndUserId(updateData.name.trim(), userId);
+      if (duplicateTag && duplicateTag.id !== tagId) {
         return res.status(400).json({
           success: false,
           error: 'Tag name already exists'
         });
       }
-
-      tag.name = updateData.name.trim();
     }
 
-    // 更新颜色
-    if (updateData.color !== undefined) {
-      if (updateData.color.trim() === '') {
-        return res.status(400).json({
-          success: false,
-          error: 'Tag color cannot be empty'
-        });
-      }
-      tag.color = updateData.color.trim();
+    if (updateData.color !== undefined && updateData.color.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        error: 'Tag color cannot be empty'
+      });
     }
 
-    tags[tagIndex] = tag;
+    // 更新标签
+    const updatedDbTag = await TagRepository.update(
+      tagId,
+      updateData.name?.trim(),
+      updateData.color?.trim()
+    );
+
+    if (!updatedDbTag) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to update tag'
+      });
+    }
+
+    const tag = convertDatabaseTagToTag(updatedDbTag);
 
     res.json({
       success: true,
@@ -358,19 +354,31 @@ router.put('/:id', (req: any, res: any) => {
  *       404:
  *         description: 标签不存在
  */
-router.delete('/:id', (req: any, res: any) => {
+router.delete('/:id', async (req: any, res: any) => {
   try {
     const { id } = req.params;
-    const tagIndex = tags.findIndex(t => t.id === id);
+    const tagId = parseInt(id, 10);
 
-    if (tagIndex === -1) {
+    if (isNaN(tagId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid tag ID'
+      });
+    }
+
+    const existingTag = await TagRepository.findById(tagId);
+    if (!existingTag) {
       return res.status(404).json({
         success: false,
         error: 'Tag not found'
       });
     }
 
-    const deletedTag = tags.splice(tagIndex, 1)[0];
+    // 转换为API格式（在删除前）
+    const deletedTag = convertDatabaseTagToTag(existingTag);
+
+    // 删除标签（会自动删除关联的todo_tags记录）
+    await TagRepository.delete(tagId);
 
     res.json({
       success: true,

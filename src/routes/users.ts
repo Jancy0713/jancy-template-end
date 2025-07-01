@@ -1,14 +1,19 @@
 import express, { Router, Request, Response } from 'express';
 import { User, UserInput, TypedRequest, ApiResponse, ErrorResponse } from '../types';
+import { UserRepository, DatabaseUser } from '../config/database';
+import { logError, logInfo } from '../config/logger';
 
 const router: Router = express.Router();
 
-// 模拟用户数据
-let users: User[] = [
-  { id: 1, name: 'Alice', email: 'alice@example.com', age: 25, avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=alice' },
-  { id: 2, name: 'Bob', email: 'bob@example.com', age: 30, avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=bob' },
-  { id: 3, name: 'Charlie', email: 'charlie@example.com', age: 35, avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=charlie' }
-];
+// 将 DatabaseUser 转换为 User 的辅助函数
+function convertToUser(dbUser: DatabaseUser): User {
+  return {
+    id: dbUser.id,
+    name: dbUser.name,
+    email: dbUser.email,
+    avatar: dbUser.avatar
+  };
+}
 
 /**
  * @swagger
@@ -31,18 +36,21 @@ let users: User[] = [
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
+    const dbUsers = await UserRepository.getAll();
+    const users = dbUsers.map(convertToUser);
+
     res.json({
       success: true,
       data: users,
       count: users.length
     });
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    logError('Get users error', error);
     res.status(500).json({
       success: false,
-      error: errorMessage
+      error: 'Internal server error'
     });
   }
 });
@@ -82,27 +90,37 @@ router.get('/', (req: Request, res: Response) => {
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.get('/:id', (req: any, res: any) => {
+router.get('/:id', async (req: any, res: any) => {
   try {
     const userId: number = parseInt(req.params.id, 10);
-    const user: User | undefined = users.find(u => u.id === userId);
-    
-    if (!user) {
+
+    if (isNaN(userId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid user ID'
+      });
+    }
+
+    const dbUser = await UserRepository.findById(userId);
+
+    if (!dbUser) {
       return res.status(404).json({
         success: false,
         error: 'User not found'
       });
     }
-    
+
+    const user = convertToUser(dbUser);
+
     res.json({
       success: true,
       data: user
     });
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    logError('Get user by ID error', error);
     res.status(500).json({
       success: false,
-      error: errorMessage
+      error: 'Internal server error'
     });
   }
 });
@@ -140,10 +158,10 @@ router.get('/:id', (req: any, res: any) => {
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post('/', (req: any, res: any) => {
+router.post('/', async (req: any, res: any) => {
   try {
     const { name, email, age, avatar }: UserInput = req.body;
-    
+
     // 简单验证
     if (!name || !email) {
       return res.status(400).json({
@@ -151,36 +169,41 @@ router.post('/', (req: any, res: any) => {
         error: 'Name and email are required'
       });
     }
-    
+
     // 检查邮箱是否已存在
-    const existingUser: User | undefined = users.find(u => u.email === email);
+    const existingUser = await UserRepository.findByEmail(email);
     if (existingUser) {
       return res.status(400).json({
         success: false,
         error: 'Email already exists'
       });
     }
-    
-    const newUser: User = {
-      id: users.length + 1,
-      name,
-      email,
-      age: age || undefined,
-      avatar: avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${email}`
-    };
-    
-    users.push(newUser);
-    
+
+    // 创建新用户 - 注意：这里使用默认密码，实际应用中应该要求密码
+    const defaultPassword = 'defaultPassword123'; // 实际应用中应该从请求中获取
+    const userAvatar = avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${email}`;
+
+    const dbUser = await UserRepository.create(email, defaultPassword, name, userAvatar);
+    const newUser = convertToUser(dbUser);
+
+    logInfo('User created successfully', {
+      userId: newUser.id,
+      email: newUser.email,
+      name: newUser.name,
+      ip: req.ip,
+      userAgent: req.get('User-Agent')
+    });
+
     res.status(201).json({
       success: true,
       data: newUser,
       message: 'User created successfully'
     });
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    logError('Create user error', error);
     res.status(500).json({
       success: false,
-      error: errorMessage
+      error: 'Internal server error'
     });
   }
 });
@@ -226,12 +249,19 @@ router.post('/', (req: any, res: any) => {
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.put('/:id', (req: any, res: any) => {
+router.put('/:id', async (req: any, res: any) => {
   try {
     const userId: number = parseInt(req.params.id, 10);
-    const userIndex: number = users.findIndex(u => u.id === userId);
 
-    if (userIndex === -1) {
+    if (isNaN(userId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid user ID'
+      });
+    }
+
+    const existingUser = await UserRepository.findById(userId);
+    if (!existingUser) {
       return res.status(404).json({
         success: false,
         error: 'User not found'
@@ -240,22 +270,51 @@ router.put('/:id', (req: any, res: any) => {
 
     const { name, email, age, avatar }: Partial<UserInput> = req.body;
 
-    // 更新用户信息
-    if (name) users[userIndex].name = name;
-    if (email) users[userIndex].email = email;
-    if (age !== undefined) users[userIndex].age = age;
-    if (avatar !== undefined) users[userIndex].avatar = avatar;
+    // 如果要更新邮箱，检查是否已存在
+    if (email && email !== existingUser.email) {
+      const emailExists = await UserRepository.findByEmail(email);
+      if (emailExists) {
+        return res.status(400).json({
+          success: false,
+          error: 'Email already exists'
+        });
+      }
+    }
+
+    // 更新用户信息 - 注意：这里只更新 name 和 avatar，因为 UserRepository.update 只支持这些字段
+    const updatedUser = await UserRepository.update(
+      userId,
+      name || existingUser.name,
+      avatar !== undefined ? avatar : existingUser.avatar
+    );
+
+    if (!updatedUser) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to update user'
+      });
+    }
+
+    const user = convertToUser(updatedUser);
+
+    logInfo('User updated successfully', {
+      userId: user.id,
+      email: user.email,
+      updatedFields: { name: !!name, avatar: avatar !== undefined },
+      ip: req.ip,
+      userAgent: req.get('User-Agent')
+    });
 
     res.json({
       success: true,
-      data: users[userIndex],
+      data: user,
       message: 'User updated successfully'
     });
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    logError('Update user error', error);
     res.status(500).json({
       success: false,
-      error: errorMessage
+      error: 'Internal server error'
     });
   }
 });
@@ -295,19 +354,45 @@ router.put('/:id', (req: any, res: any) => {
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.delete('/:id', (req: any, res: any) => {
+router.delete('/:id', async (req: any, res: any) => {
   try {
     const userId: number = parseInt(req.params.id, 10);
-    const userIndex: number = users.findIndex(u => u.id === userId);
 
-    if (userIndex === -1) {
+    if (isNaN(userId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid user ID'
+      });
+    }
+
+    const existingUser = await UserRepository.findById(userId);
+    if (!existingUser) {
       return res.status(404).json({
         success: false,
         error: 'User not found'
       });
     }
 
-    const deletedUser: User = users.splice(userIndex, 1)[0];
+    // 删除用户（不再有测试账号保护）
+
+    const deletedCount = await UserRepository.delete(userId);
+
+    if (deletedCount === 0) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to delete user'
+      });
+    }
+
+    const deletedUser = convertToUser(existingUser);
+
+    logInfo('User deleted successfully', {
+      userId: deletedUser.id,
+      email: deletedUser.email,
+      name: deletedUser.name,
+      ip: req.ip,
+      userAgent: req.get('User-Agent')
+    });
 
     res.json({
       success: true,
@@ -315,10 +400,10 @@ router.delete('/:id', (req: any, res: any) => {
       message: 'User deleted successfully'
     });
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    logError('Delete user error', error);
     res.status(500).json({
       success: false,
-      error: errorMessage
+      error: 'Internal server error'
     });
   }
 });

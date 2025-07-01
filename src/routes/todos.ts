@@ -15,164 +15,166 @@ import {
   PaginatedResponse,
   ApiResponse
 } from '../types';
+import {
+  TodoRepository,
+  TagRepository,
+  TodoHistoryRepository,
+  DatabaseTodo,
+  DatabaseTag
+} from '../config/database';
 
 const router: Router = express.Router();
 
-// 模拟数据存储
-let todos: Todo[] = [
-  {
-    id: '1',
-    title: '完成项目文档',
-    description: '编写项目的技术文档和用户手册',
-    status: 'in-progress',
-    priority: 'high',
-    tags: ['work', 'documentation'],
-    dueDate: new Date('2025-07-01'),
-    createdAt: new Date('2025-06-20'),
-    updatedAt: new Date('2025-06-25'),
-    order: 1,
-    history: []
-  },
-  {
-    id: '2',
-    title: '学习TypeScript',
-    description: '深入学习TypeScript的高级特性',
-    status: 'pending',
-    priority: 'medium',
-    tags: ['learning', 'typescript'],
-    dueDate: new Date('2025-07-15'),
-    createdAt: new Date('2025-06-22'),
-    updatedAt: new Date('2025-06-22'),
-    order: 2,
-    history: []
-  },
-  {
-    id: '3',
-    title: '健身计划',
-    description: '制定并执行每周的健身计划',
-    status: 'completed',
-    priority: 'low',
-    tags: ['health', 'personal'],
-    completedAt: new Date('2025-06-24'),
-    createdAt: new Date('2025-06-15'),
-    updatedAt: new Date('2025-06-24'),
-    order: 3,
-    history: []
+// 工具函数 - 将数据库TODO转换为API TODO格式
+async function convertDatabaseTodoToTodo(dbTodo: DatabaseTodo): Promise<Todo> {
+  // 获取标签
+  const tags = await TodoRepository.getTags(dbTodo.id);
+  const tagNames = tags.map(tag => tag.name);
+
+  // 获取历史记录
+  const historyRecords = await TodoHistoryRepository.findByTodoId(dbTodo.id);
+  const history: HistoryRecord[] = historyRecords.map(record => ({
+    id: record.id.toString(),
+    todoId: dbTodo.id.toString(),
+    actionType: record.action_type as HistoryActionType,
+    timestamp: new Date(record.timestamp),
+    changes: record.changes ? JSON.parse(record.changes) : undefined,
+    operator: record.operator
+  }));
+
+  return {
+    id: dbTodo.id.toString(),
+    title: dbTodo.title,
+    description: dbTodo.description,
+    status: dbTodo.status,
+    priority: dbTodo.priority,
+    tags: tagNames,
+    dueDate: dbTodo.due_date ? new Date(dbTodo.due_date) : undefined,
+    completedAt: dbTodo.completed_at ? new Date(dbTodo.completed_at) : undefined,
+    createdAt: new Date(dbTodo.created_at),
+    updatedAt: new Date(dbTodo.updated_at),
+    order: dbTodo.order_index,
+    history
+  };
+}
+
+// 模拟用户ID获取函数（实际项目中应该从认证中间件获取）
+function getCurrentUserId(req: any): number {
+  // 这里应该从JWT token或session中获取用户ID
+  // 为了演示，我们使用固定的用户ID
+  return 1;
+}
+
+// 根据标签名称获取或创建标签ID
+async function getOrCreateTagIds(tagNames: string[], userId: number): Promise<number[]> {
+  const tagIds: number[] = [];
+
+  for (const tagName of tagNames) {
+    let tag = await TagRepository.findByNameAndUserId(tagName, userId);
+    if (!tag) {
+      // 如果标签不存在，创建新标签（使用默认颜色）
+      const defaultColors = ['#409EFF', '#67C23A', '#E6A23C', '#F56C6C', '#909399'];
+      const color = defaultColors[Math.floor(Math.random() * defaultColors.length)];
+      tag = await TagRepository.create(tagName, color, userId);
+    }
+    tagIds.push(tag.id);
   }
-];
 
-let nextId = 4;
+  return tagIds;
+}
 
-// 工具函数
-const generateId = (): string => (nextId++).toString();
+// 数据库查询构建函数
+function buildTodoQuery(userId: number, filters?: FilterOptions, sort?: SortOptions) {
+  const { db } = require('../config/database');
+  let query = db('todos').where('user_id', userId);
 
-const createHistoryRecord = (
-  todoId: string, 
-  actionType: HistoryActionType, 
-  changes?: any
-): HistoryRecord => ({
-  id: generateId(),
-  todoId,
-  actionType,
-  timestamp: new Date(),
-  changes,
-  operator: 'system'
-});
-
-const applyFilters = (todos: Todo[], filters: FilterOptions): Todo[] => {
-  return todos.filter(todo => {
-    // 状态筛选
+  // 应用筛选条件
+  if (filters) {
     if (filters.status && filters.status.length > 0) {
-      if (!filters.status.includes(todo.status)) return false;
+      query = query.whereIn('status', filters.status);
     }
-    
-    // 优先级筛选
+
     if (filters.priority && filters.priority.length > 0) {
-      if (!filters.priority.includes(todo.priority)) return false;
+      query = query.whereIn('priority', filters.priority);
     }
-    
-    // 标签筛选
-    if (filters.tags && filters.tags.length > 0) {
-      if (!filters.tags.some(tag => todo.tags.includes(tag))) return false;
-    }
-    
-    // 关键词筛选
+
     if (filters.keyword) {
-      const keyword = filters.keyword.toLowerCase();
-      if (!todo.title.toLowerCase().includes(keyword) && 
-          !todo.description?.toLowerCase().includes(keyword)) {
-        return false;
-      }
+      const keyword = `%${filters.keyword}%`;
+      query = query.where(function() {
+        this.where('title', 'like', keyword)
+            .orWhere('description', 'like', keyword);
+      });
     }
-    
-    // 日期范围筛选
+
     if (filters.dateRange) {
       const { type, start, end } = filters.dateRange;
-      let targetDate: Date;
-      
+      let dateField: string;
+
       switch (type) {
         case 'created':
-          targetDate = todo.createdAt;
+          dateField = 'created_at';
           break;
         case 'updated':
-          targetDate = todo.updatedAt;
+          dateField = 'updated_at';
           break;
         case 'completed':
-          if (!todo.completedAt) return false;
-          targetDate = todo.completedAt;
+          dateField = 'completed_at';
+          query = query.whereNotNull('completed_at');
           break;
         default:
-          return true;
+          dateField = 'created_at';
       }
-      
-      if (start && targetDate < start) return false;
-      if (end && targetDate > end) return false;
-    }
-    
-    return true;
-  });
-};
 
-const applySorting = (todos: Todo[], sort: SortOptions): Todo[] => {
-  return [...todos].sort((a, b) => {
-    let aValue: any, bValue: any;
-    
+      if (start) {
+        query = query.where(dateField, '>=', start.toISOString());
+      }
+      if (end) {
+        query = query.where(dateField, '<=', end.toISOString());
+      }
+    }
+  }
+
+  // 应用排序
+  if (sort) {
+    let orderField: string;
     switch (sort.field) {
       case 'priority':
-        const priorityOrder = { high: 3, medium: 2, low: 1 };
-        aValue = priorityOrder[a.priority];
-        bValue = priorityOrder[b.priority];
-        break;
+        // SQLite中按优先级排序需要使用CASE语句
+        query = query.orderByRaw(`
+          CASE priority
+            WHEN 'high' THEN 3
+            WHEN 'medium' THEN 2
+            WHEN 'low' THEN 1
+          END ${sort.order === 'desc' ? 'DESC' : 'ASC'}
+        `);
+        return query;
       case 'createdAt':
-        aValue = a.createdAt.getTime();
-        bValue = b.createdAt.getTime();
+        orderField = 'created_at';
         break;
       case 'updatedAt':
-        aValue = a.updatedAt.getTime();
-        bValue = b.updatedAt.getTime();
+        orderField = 'updated_at';
         break;
       case 'completedAt':
-        aValue = a.completedAt?.getTime() || 0;
-        bValue = b.completedAt?.getTime() || 0;
+        orderField = 'completed_at';
         break;
       case 'dueDate':
-        aValue = a.dueDate?.getTime() || Infinity;
-        bValue = b.dueDate?.getTime() || Infinity;
+        orderField = 'due_date';
         break;
       case 'order':
-        aValue = a.order;
-        bValue = b.order;
+        orderField = 'order_index';
         break;
       default:
-        return 0;
+        orderField = 'order_index';
     }
-    
-    if (sort.order === 'desc') {
-      return bValue - aValue;
-    }
-    return aValue - bValue;
-  });
-};
+
+    query = query.orderBy(orderField, sort.order);
+  } else {
+    // 默认按order_index排序
+    query = query.orderBy('order_index', 'asc');
+  }
+
+  return query;
+}
 
 /**
  * @swagger
@@ -261,8 +263,9 @@ const applySorting = (todos: Todo[], sort: SortOptions): Todo[] => {
  *                   type: integer
  *                   example: 10
  */
-router.get('/', (req: any, res: any) => {
+router.get('/', async (req: any, res: any) => {
   try {
+    const userId = getCurrentUserId(req);
     const {
       page = 1,
       size = 10,
@@ -287,20 +290,41 @@ router.get('/', (req: any, res: any) => {
       order: sortOrder
     };
 
-    // 应用筛选和排序
-    let filteredTodos = applyFilters(todos, filters);
-    let sortedTodos = applySorting(filteredTodos, sort);
+    // 构建查询
+    let query = buildTodoQuery(userId, filters, sort);
+
+    // 处理标签筛选（需要特殊处理，因为涉及关联表）
+    if (filters.tags && filters.tags.length > 0) {
+      query = query
+        .join('todo_tags', 'todos.id', 'todo_tags.todo_id')
+        .join('tags', 'todo_tags.tag_id', 'tags.id')
+        .whereIn('tags.name', filters.tags)
+        .groupBy('todos.id')
+        .select('todos.*');
+    }
+
+    // 获取总数（用于分页）
+    const countQuery = query.clone().clearSelect().clearOrder().count('* as count').first();
+    const totalResult = await countQuery;
+    const total = parseInt(totalResult?.count as string) || 0;
 
     // 分页
     const pageNum = parseInt(page);
     const pageSize = parseInt(size);
-    const startIndex = (pageNum - 1) * pageSize;
-    const endIndex = startIndex + pageSize;
-    const paginatedTodos = sortedTodos.slice(startIndex, endIndex);
+    const offset = (pageNum - 1) * pageSize;
+
+    const dbTodos = await query.limit(pageSize).offset(offset);
+
+    // 转换为API格式
+    const todos: Todo[] = [];
+    for (const dbTodo of dbTodos) {
+      const todo = await convertDatabaseTodoToTodo(dbTodo);
+      todos.push(todo);
+    }
 
     const response: PaginatedResponse<Todo> = {
-      data: paginatedTodos,
-      total: sortedTodos.length,
+      data: todos,
+      total,
       page: pageNum,
       size: pageSize
     };
@@ -348,17 +372,28 @@ router.get('/', (req: any, res: any) => {
  *       404:
  *         description: 任务不存在
  */
-router.get('/:id', (req: any, res: any) => {
+router.get('/:id', async (req: any, res: any) => {
   try {
     const { id } = req.params;
-    const todo = todos.find(t => t.id === id);
+    const todoId = parseInt(id, 10);
 
-    if (!todo) {
+    if (isNaN(todoId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid todo ID'
+      });
+    }
+
+    const dbTodo = await TodoRepository.findById(todoId);
+
+    if (!dbTodo) {
       return res.status(404).json({
         success: false,
         error: 'Todo not found'
       });
     }
+
+    const todo = await convertDatabaseTodoToTodo(dbTodo);
 
     res.json({
       success: true,
@@ -402,8 +437,9 @@ router.get('/:id', (req: any, res: any) => {
  *       400:
  *         description: 请求参数错误
  */
-router.post('/', (req: any, res: any) => {
+router.post('/', async (req: any, res: any) => {
   try {
+    const userId = getCurrentUserId(req);
     const { title, description, priority = 'medium', tags = [], dueDate }: CreateTodoData = req.body;
 
     if (!title || title.trim() === '') {
@@ -413,30 +449,30 @@ router.post('/', (req: any, res: any) => {
       });
     }
 
-    const now = new Date();
-    const newTodo: Todo = {
-      id: generateId(),
-      title: title.trim(),
-      description: description?.trim(),
-      status: 'pending',
+    // 创建TODO
+    const dbTodo = await TodoRepository.create(
+      title.trim(),
+      userId,
+      description?.trim(),
       priority,
-      tags,
-      dueDate: dueDate ? new Date(dueDate) : undefined,
-      createdAt: now,
-      updatedAt: now,
-      order: todos.length + 1,
-      history: []
-    };
+      dueDate ? new Date(dueDate) : undefined
+    );
 
-    // 添加创建历史记录
-    const historyRecord = createHistoryRecord(newTodo.id, 'create');
-    newTodo.history.push(historyRecord);
+    // 处理标签
+    if (tags.length > 0) {
+      const tagIds = await getOrCreateTagIds(tags, userId);
+      await TodoRepository.setTags(dbTodo.id, tagIds);
+    }
 
-    todos.push(newTodo);
+    // 添加历史记录
+    await TodoHistoryRepository.add(dbTodo.id, 'create');
+
+    // 转换为API格式
+    const todo = await convertDatabaseTodoToTodo(dbTodo);
 
     res.status(201).json({
       success: true,
-      data: newTodo,
+      data: todo,
       message: 'Todo created successfully'
     });
   } catch (error) {
@@ -484,81 +520,82 @@ router.post('/', (req: any, res: any) => {
  *       404:
  *         description: 任务不存在
  */
-router.put('/:id', (req: any, res: any) => {
+router.put('/:id', async (req: any, res: any) => {
   try {
+    const userId = getCurrentUserId(req);
     const { id } = req.params;
     const updateData: UpdateTodoData = req.body;
+    const todoId = parseInt(id, 10);
 
-    const todoIndex = todos.findIndex(t => t.id === id);
-    if (todoIndex === -1) {
+    if (isNaN(todoId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid todo ID'
+      });
+    }
+
+    const existingTodo = await TodoRepository.findById(todoId);
+    if (!existingTodo) {
       return res.status(404).json({
         success: false,
         error: 'Todo not found'
       });
     }
 
-    const todo = todos[todoIndex];
-    const oldTodo = { ...todo };
-
-    // 更新字段
-    if (updateData.title !== undefined) {
-      if (updateData.title.trim() === '') {
-        return res.status(400).json({
-          success: false,
-          error: 'Title cannot be empty'
-        });
-      }
-      todo.title = updateData.title.trim();
+    // 验证标题
+    if (updateData.title !== undefined && updateData.title.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        error: 'Title cannot be empty'
+      });
     }
 
-    if (updateData.description !== undefined) {
-      todo.description = updateData.description?.trim();
-    }
-
+    // 准备更新数据
+    const updates: any = {};
+    if (updateData.title !== undefined) updates.title = updateData.title.trim();
+    if (updateData.description !== undefined) updates.description = updateData.description?.trim();
     if (updateData.status !== undefined) {
-      todo.status = updateData.status;
-      if (updateData.status === 'completed' && !todo.completedAt) {
-        todo.completedAt = new Date();
-      } else if (updateData.status !== 'completed') {
-        todo.completedAt = undefined;
+      updates.status = updateData.status;
+      if (updateData.status === 'completed') {
+        updates.completedAt = new Date();
+      } else if (existingTodo.completed_at) {
+        updates.completedAt = null; // 清除完成时间
       }
     }
-
-    if (updateData.priority !== undefined) {
-      todo.priority = updateData.priority;
-    }
-
-    if (updateData.tags !== undefined) {
-      todo.tags = updateData.tags;
-    }
-
+    if (updateData.priority !== undefined) updates.priority = updateData.priority;
     if (updateData.dueDate !== undefined) {
-      todo.dueDate = updateData.dueDate ? new Date(updateData.dueDate) : undefined;
+      updates.dueDate = updateData.dueDate ? new Date(updateData.dueDate) : undefined;
+    }
+    if (updateData.order !== undefined) updates.orderIndex = updateData.order;
+
+    // 更新TODO
+    const updatedTodo = await TodoRepository.update(todoId, updates);
+    if (!updatedTodo) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to update todo'
+      });
     }
 
-    if (updateData.order !== undefined) {
-      todo.order = updateData.order;
+    // 处理标签更新
+    if (updateData.tags !== undefined) {
+      const tagIds = await getOrCreateTagIds(updateData.tags, userId);
+      await TodoRepository.setTags(todoId, tagIds);
     }
-
-    todo.updatedAt = new Date();
 
     // 记录变更历史
-    Object.keys(updateData).forEach(field => {
-      if (field in oldTodo && (oldTodo as any)[field] !== (todo as any)[field]) {
-        const historyRecord = createHistoryRecord(
-          todo.id,
-          `update_${field}` as HistoryActionType,
-          {
-            field,
-            oldValue: (oldTodo as any)[field],
-            newValue: (todo as any)[field]
-          }
-        );
-        todo.history.push(historyRecord);
-      }
-    });
+    const changes = Object.keys(updateData).map(field => ({
+      field,
+      oldValue: (existingTodo as any)[field],
+      newValue: (updateData as any)[field]
+    }));
 
-    todos[todoIndex] = todo;
+    if (changes.length > 0) {
+      await TodoHistoryRepository.add(todoId, 'update_status', { changes });
+    }
+
+    // 转换为API格式
+    const todo = await convertDatabaseTodoToTodo(updatedTodo);
 
     res.json({
       success: true,
@@ -605,19 +642,31 @@ router.put('/:id', (req: any, res: any) => {
  *       404:
  *         description: 任务不存在
  */
-router.delete('/:id', (req: any, res: any) => {
+router.delete('/:id', async (req: any, res: any) => {
   try {
     const { id } = req.params;
-    const todoIndex = todos.findIndex(t => t.id === id);
+    const todoId = parseInt(id, 10);
 
-    if (todoIndex === -1) {
+    if (isNaN(todoId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid todo ID'
+      });
+    }
+
+    const existingTodo = await TodoRepository.findById(todoId);
+    if (!existingTodo) {
       return res.status(404).json({
         success: false,
         error: 'Todo not found'
       });
     }
 
-    const deletedTodo = todos.splice(todoIndex, 1)[0];
+    // 转换为API格式（在删除前）
+    const deletedTodo = await convertDatabaseTodoToTodo(existingTodo);
+
+    // 删除TODO（会自动删除关联的标签和历史记录）
+    await TodoRepository.delete(todoId);
 
     res.json({
       success: true,
@@ -664,8 +713,9 @@ router.delete('/:id', (req: any, res: any) => {
  *                   type: string
  *                   example: "Batch operation completed"
  */
-router.post('/batch', (req: any, res: any) => {
+router.post('/batch', async (req: any, res: any) => {
   try {
+    const userId = getCurrentUserId(req);
     const { action, ids, data }: BatchOperation = req.body;
 
     if (!action || !ids || !Array.isArray(ids) || ids.length === 0) {
@@ -675,12 +725,19 @@ router.post('/batch', (req: any, res: any) => {
       });
     }
 
+    // 转换字符串ID为数字ID
+    const todoIds = ids.map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+    if (todoIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid todo IDs'
+      });
+    }
+
     let affected = 0;
 
     if (action === 'delete') {
-      const initialLength = todos.length;
-      todos = todos.filter(todo => !ids.includes(todo.id));
-      affected = initialLength - todos.length;
+      affected = await TodoRepository.batchDelete(todoIds);
     } else if (action === 'update') {
       if (!data) {
         return res.status(400).json({
@@ -689,30 +746,36 @@ router.post('/batch', (req: any, res: any) => {
         });
       }
 
-      todos.forEach(todo => {
-        if (ids.includes(todo.id)) {
-          const oldTodo = { ...todo };
+      // 处理批量状态更新（最常见的批量操作）
+      if (data.status) {
+        affected = await TodoRepository.batchUpdateStatus(todoIds, data.status);
 
-          // 应用更新
-          Object.keys(data).forEach(key => {
-            if (key in todo && data[key as keyof UpdateTodoData] !== undefined) {
-              (todo as any)[key] = data[key as keyof UpdateTodoData];
-            }
-          });
-
-          todo.updatedAt = new Date();
-
-          // 记录历史
-          const historyRecord = createHistoryRecord(
-            todo.id,
+        // 为每个TODO添加历史记录
+        for (const todoId of todoIds) {
+          await TodoHistoryRepository.add(
+            todoId,
             'update_status',
-            { field: 'batch_update', oldValue: 'multiple', newValue: 'multiple' }
+            { field: 'status', newValue: data.status, batchOperation: true }
           );
-          todo.history.push(historyRecord);
-
-          affected++;
         }
-      });
+      } else {
+        // 处理其他批量更新（逐个更新）
+        for (const todoId of todoIds) {
+          const updates: any = {};
+          if (data.priority !== undefined) updates.priority = data.priority;
+          if (data.dueDate !== undefined) updates.dueDate = data.dueDate ? new Date(data.dueDate) : undefined;
+
+          const updated = await TodoRepository.update(todoId, updates);
+          if (updated) {
+            affected++;
+            await TodoHistoryRepository.add(
+              todoId,
+              'update_status',
+              { batchOperation: true, updates }
+            );
+          }
+        }
+      }
     } else {
       return res.status(400).json({
         success: false,
@@ -762,7 +825,7 @@ router.post('/batch', (req: any, res: any) => {
  *                   type: string
  *                   example: "Todos reordered successfully"
  */
-router.post('/reorder', (req: any, res: any) => {
+router.post('/reorder', async (req: any, res: any) => {
   try {
     const { todoIds } = req.body;
 
@@ -773,21 +836,26 @@ router.post('/reorder', (req: any, res: any) => {
       });
     }
 
-    // 更新排序
-    todoIds.forEach((id: string, index: number) => {
-      const todo = todos.find(t => t.id === id);
-      if (todo) {
-        todo.order = index + 1;
-        todo.updatedAt = new Date();
+    // 转换字符串ID为数字ID
+    const numericTodoIds = todoIds.map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+    if (numericTodoIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid todo IDs'
+      });
+    }
 
-        const historyRecord = createHistoryRecord(
-          todo.id,
-          'update_order',
-          { field: 'order', oldValue: todo.order, newValue: index + 1 }
-        );
-        todo.history.push(historyRecord);
-      }
-    });
+    // 重新排序
+    await TodoRepository.reorder(numericTodoIds);
+
+    // 为每个TODO添加历史记录
+    for (let i = 0; i < numericTodoIds.length; i++) {
+      await TodoHistoryRepository.add(
+        numericTodoIds[i],
+        'update_order',
+        { field: 'order', newValue: i + 1 }
+      );
+    }
 
     res.json({
       success: true,

@@ -17,6 +17,9 @@ import {
   badRequestLogger
 } from './middleware/requestLogger';
 
+// 导入数据库初始化
+import { initDatabase, closeDatabase } from './config/database';
+
 // 加载环境变量
 config();
 
@@ -183,27 +186,57 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   });
 });
 
-// 启动服务器
-app.listen(PORT, '0.0.0.0', () => {
-  const startupInfo = {
-    port: PORT,
-    environment: process.env.NODE_ENV || 'development',
-    localUrl: `http://localhost:${PORT}`,
-    networkUrl: `http://192.168.50.79:${PORT}`,
-    docsUrl: `http://192.168.50.79:${PORT}/api-docs`,
-    logsDir: 'logs/',
-    timestamp: new Date().toISOString()
-  };
+// 启动服务器函数
+async function startServer() {
+  try {
+    // 初始化数据库
+    await initDatabase();
 
-  logInfo('🚀 Server started successfully', startupInfo);
+    // 启动服务器
+    app.listen(PORT, '0.0.0.0', () => {
+      const startupInfo = {
+        port: PORT,
+        environment: process.env.NODE_ENV || 'development',
+        localUrl: `http://localhost:${PORT}`,
+        networkUrl: `http://192.168.50.79:${PORT}`,
+        docsUrl: `http://192.168.50.79:${PORT}/api-docs`,
+        logsDir: 'logs/',
+        dbPath: 'data/app.db',
+        timestamp: new Date().toISOString()
+      };
 
-  // 控制台输出（保留用户友好的格式）
-  console.log(`🚀 Server is running on port ${PORT}`);
-  console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🌐 Local Access: http://localhost:${PORT}`);
-  console.log(`🌐 Network Access: http://192.168.50.79:${PORT}`);
-  console.log(`📚 API Documentation: http://192.168.50.79:${PORT}/api-docs`);
-  console.log(`📝 Logs Directory: logs/`);
+      logInfo('🚀 Server started successfully', startupInfo);
+
+      // 控制台输出（保留用户友好的格式）
+      console.log(`🚀 Server is running on port ${PORT}`);
+      console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`🌐 Local Access: http://localhost:${PORT}`);
+      console.log(`🌐 Network Access: http://192.168.50.79:${PORT}`);
+      console.log(`📚 API Documentation: http://192.168.50.79:${PORT}/api-docs`);
+      console.log(`📝 Logs Directory: logs/`);
+      console.log(`💾 Database: data/app.db`);
+    });
+  } catch (error) {
+    logError('Failed to start server', error);
+    console.error('❌ Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+// 优雅关闭处理
+process.on('SIGINT', async () => {
+  console.log('\n🛑 Received SIGINT, shutting down gracefully...');
+  await closeDatabase();
+  process.exit(0);
 });
+
+process.on('SIGTERM', async () => {
+  console.log('\n🛑 Received SIGTERM, shutting down gracefully...');
+  await closeDatabase();
+  process.exit(0);
+});
+
+// 启动服务器
+startServer();
 
 export default app;

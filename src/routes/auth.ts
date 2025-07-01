@@ -9,35 +9,23 @@ import {
   DeleteAccountRequest
 } from '../types';
 import { logError, logInfo, logWarn } from '../config/logger';
+import {
+  UserRepository,
+  RefreshTokenRepository,
+  TokenBlacklistRepository,
+  DatabaseUser
+} from '../config/database';
 
 const router: Router = express.Router();
 
-// 模拟用户数据库
-interface DatabaseUser {
-  id: number;
-  email: string;
-  password: string;
-  name: string;
-  avatar?: string;
-}
-
-const users: DatabaseUser[] = [
-  { id: 1, email: 'admin@example.com', password: 'admin123', name: 'Admin', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=admin' },
-  { id: 2, email: 'user@example.com', password: 'user123', name: 'User', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=user' }
-];
-
-// 模拟token黑名单 (实际项目中应该使用Redis或数据库)
-const tokenBlacklist: Set<string> = new Set();
-const refreshTokenStore: Map<string, { userId: number; createdAt: number }> = new Map();
-
 // 生成唯一用户名的辅助函数
-function generateUniqueUsername(email: string, providedName?: string): string {
+async function generateUniqueUsername(email: string, providedName?: string): Promise<string> {
   let baseName = providedName || email.split('@')[0];
   let username = baseName;
   let counter = 1;
 
-  // 检查用户名是否已存在（这里简化检查，实际项目中应该查询数据库）
-  while (users.some(user => user.name === username)) {
+  // 检查用户名是否已存在
+  while (await UserRepository.findByEmail(username + '@temp.com')) {
     username = `${baseName}${counter}`;
     counter++;
   }
@@ -84,10 +72,10 @@ function generateUniqueUsername(email: string, providedName?: string): string {
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post('/login', (req: any, res: any) => {
+router.post('/login', async (req: any, res: any) => {
   try {
     const { email, password }: LoginRequest = req.body;
-    
+
     // 验证必填字段
     if (!email || !password) {
       return res.status(400).json({
@@ -95,16 +83,16 @@ router.post('/login', (req: any, res: any) => {
         error: 'Email and password are required'
       });
     }
-    
+
     // 查找用户
-    const user: DatabaseUser | undefined = users.find(u => u.email === email);
+    const user: DatabaseUser | undefined = await UserRepository.findByEmail(email);
     if (!user) {
       return res.status(401).json({
         success: false,
         error: 'Invalid email or password'
       });
     }
-    
+
     // 验证密码 (实际项目中应该使用加密密码)
     if (user.password !== password) {
       return res.status(401).json({
@@ -112,7 +100,7 @@ router.post('/login', (req: any, res: any) => {
         error: 'Invalid email or password'
       });
     }
-    
+
     // 模拟生成 JWT token 和 refresh token (实际项目中应该使用真实的JWT)
     const token: string = `mock_token_${user.id}_${Date.now()}`;
     const refreshToken: string = `mock_refresh_token_${user.id}_${Date.now()}`;
@@ -121,11 +109,9 @@ router.post('/login', (req: any, res: any) => {
     const tokenExpiresIn = 60 * 60; // 1小时
     const refreshTokenExpiresIn = 7 * 24 * 60 * 60; // 7天
 
-    // 存储refresh token
-    refreshTokenStore.set(refreshToken, {
-      userId: user.id,
-      createdAt: Date.now()
-    });
+    // 存储refresh token到数据库
+    const expiresAt = new Date(Date.now() + refreshTokenExpiresIn * 1000);
+    await RefreshTokenRepository.create(refreshToken, user.id, expiresAt);
 
     const authUser: AuthUser = {
       id: user.id,
@@ -133,6 +119,13 @@ router.post('/login', (req: any, res: any) => {
       name: user.name,
       avatar: user.avatar
     };
+
+    logInfo('User logged in successfully', {
+      userId: user.id,
+      email: user.email,
+      ip: req.ip,
+      userAgent: req.get('User-Agent')
+    });
 
     res.json({
       success: true,
@@ -146,10 +139,10 @@ router.post('/login', (req: any, res: any) => {
       message: 'Login successful'
     });
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    logError('Login error', error);
     res.status(500).json({
       success: false,
-      error: errorMessage
+      error: 'Internal server error'
     });
   }
 });
@@ -187,7 +180,7 @@ router.post('/login', (req: any, res: any) => {
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post('/register', (req: any, res: any) => {
+router.post('/register', async (req: any, res: any) => {
   try {
     const { name, email, password, confirm_password }: RegisterRequest = req.body;
 
@@ -215,9 +208,6 @@ router.post('/register', (req: any, res: any) => {
       });
     }
 
-    // 生成唯一用户名
-    const userName = generateUniqueUsername(email, name);
-
     // 验证密码确认
     if (password !== confirm_password) {
       logWarn('Registration failed: Password mismatch', { email, ip: req.ip });
@@ -241,7 +231,7 @@ router.post('/register', (req: any, res: any) => {
     }
 
     // 检查邮箱是否已存在
-    const existingUser: DatabaseUser | undefined = users.find(u => u.email === email);
+    const existingUser: DatabaseUser | undefined = await UserRepository.findByEmail(email);
     if (existingUser) {
       logWarn('Registration failed: Email already exists', { email, ip: req.ip });
       return res.status(400).json({
@@ -250,16 +240,16 @@ router.post('/register', (req: any, res: any) => {
       });
     }
 
+    // 生成唯一用户名
+    const userName = await generateUniqueUsername(email, name);
+
     // 创建新用户
-    const newUser: DatabaseUser = {
-      id: users.length + 1,
-      name: userName,
+    const newUser: DatabaseUser = await UserRepository.create(
       email,
       password, // 实际项目中应该加密密码
-      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${email}` // 默认头像
-    };
-
-    users.push(newUser);
+      userName,
+      `https://api.dicebear.com/7.x/avataaars/svg?seed=${email}` // 默认头像
+    );
 
     // 模拟生成 JWT token 和 refresh token
     const token: string = `mock_token_${newUser.id}_${Date.now()}`;
@@ -269,11 +259,9 @@ router.post('/register', (req: any, res: any) => {
     const tokenExpiresIn = 60 * 60; // 1小时
     const refreshTokenExpiresIn = 7 * 24 * 60 * 60; // 7天
 
-    // 存储refresh token
-    refreshTokenStore.set(refreshToken, {
-      userId: newUser.id,
-      createdAt: Date.now()
-    });
+    // 存储refresh token到数据库
+    const expiresAt = new Date(Date.now() + refreshTokenExpiresIn * 1000);
+    await RefreshTokenRepository.create(refreshToken, newUser.id, expiresAt);
 
     const authUser: AuthUser = {
       id: newUser.id,
@@ -310,10 +298,9 @@ router.post('/register', (req: any, res: any) => {
       requestBody: JSON.stringify(req.body).replace(/"password":"[^"]*"/g, '"password":"***"')
     });
 
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     res.status(500).json({
       success: false,
-      error: errorMessage
+      error: 'Internal server error'
     });
   }
 });
@@ -353,7 +340,7 @@ router.post('/register', (req: any, res: any) => {
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.get('/profile', (req: any, res: any) => {
+router.get('/profile', async (req: any, res: any) => {
   try {
     // 模拟从token中获取用户信息
     const token: string | undefined = req.headers.authorization?.replace('Bearer ', '');
@@ -366,7 +353,8 @@ router.get('/profile', (req: any, res: any) => {
     }
 
     // 检查token是否在黑名单中
-    if (tokenBlacklist.has(token)) {
+    const isBlacklisted = await TokenBlacklistRepository.isBlacklisted(token);
+    if (isBlacklisted) {
       return res.status(401).json({
         success: false,
         error: 'Token has been revoked'
@@ -384,7 +372,7 @@ router.get('/profile', (req: any, res: any) => {
     // 从token中提取用户ID (模拟)
     const tokenParts: string[] = token.split('_');
     const userId: number = parseInt(tokenParts[2], 10);
-    const user: DatabaseUser | undefined = users.find(u => u.id === userId);
+    const user: DatabaseUser | undefined = await UserRepository.findById(userId);
 
     if (!user) {
       return res.status(401).json({
@@ -405,10 +393,10 @@ router.get('/profile', (req: any, res: any) => {
       data: authUser
     });
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    logError('Profile error', error);
     res.status(500).json({
       success: false,
-      error: errorMessage
+      error: 'Internal server error'
     });
   }
 });
@@ -462,7 +450,7 @@ router.get('/profile', (req: any, res: any) => {
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.put('/profile', (req: any, res: any) => {
+router.put('/profile', async (req: any, res: any) => {
   try {
     // 模拟从token中获取用户信息
     const token: string | undefined = req.headers.authorization?.replace('Bearer ', '');
@@ -475,7 +463,8 @@ router.put('/profile', (req: any, res: any) => {
     }
 
     // 检查token是否在黑名单中
-    if (tokenBlacklist.has(token)) {
+    const isBlacklisted = await TokenBlacklistRepository.isBlacklisted(token);
+    if (isBlacklisted) {
       return res.status(401).json({
         success: false,
         error: 'Token has been revoked'
@@ -493,9 +482,9 @@ router.put('/profile', (req: any, res: any) => {
     // 从token中提取用户ID (模拟)
     const tokenParts: string[] = token.split('_');
     const userId: number = parseInt(tokenParts[2], 10);
-    const userIndex: number = users.findIndex(u => u.id === userId);
+    const user: DatabaseUser | undefined = await UserRepository.findById(userId);
 
-    if (userIndex === -1) {
+    if (!user) {
       return res.status(401).json({
         success: false,
         error: 'User not found'
@@ -513,14 +502,19 @@ router.put('/profile', (req: any, res: any) => {
     }
 
     // 更新用户信息
-    if (name) {
-      users[userIndex].name = name;
-    }
-    if (avatar) {
-      users[userIndex].avatar = avatar;
+    const updatedUser = await UserRepository.update(
+      userId,
+      name || user.name,
+      avatar !== undefined ? avatar : user.avatar
+    );
+
+    if (!updatedUser) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to update user'
+      });
     }
 
-    const updatedUser = users[userIndex];
     const authUser: AuthUser = {
       id: updatedUser.id,
       email: updatedUser.email,
@@ -528,16 +522,24 @@ router.put('/profile', (req: any, res: any) => {
       avatar: updatedUser.avatar
     };
 
+    logInfo('User profile updated successfully', {
+      userId: updatedUser.id,
+      email: updatedUser.email,
+      updatedFields: { name: !!name, avatar: !!avatar },
+      ip: req.ip,
+      userAgent: req.get('User-Agent')
+    });
+
     res.json({
       success: true,
       data: authUser,
       message: 'Profile updated successfully'
     });
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    logError('Profile update error', error);
     res.status(500).json({
       success: false,
-      error: errorMessage
+      error: 'Internal server error'
     });
   }
 });
@@ -580,7 +582,7 @@ router.put('/profile', (req: any, res: any) => {
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post('/refresh-token', (req: any, res: any) => {
+router.post('/refresh-token', async (req: any, res: any) => {
   try {
     const { refreshToken }: RefreshTokenRequest = req.body;
 
@@ -592,7 +594,7 @@ router.post('/refresh-token', (req: any, res: any) => {
     }
 
     // 验证refresh token
-    const tokenData = refreshTokenStore.get(refreshToken);
+    const tokenData = await RefreshTokenRepository.find(refreshToken);
     if (!tokenData) {
       return res.status(401).json({
         success: false,
@@ -600,11 +602,11 @@ router.post('/refresh-token', (req: any, res: any) => {
       });
     }
 
-    // 检查refresh token是否过期 (假设7天过期)
-    const tokenAge = Date.now() - tokenData.createdAt;
-    const maxAge = 7 * 24 * 60 * 60 * 1000; // 7天
-    if (tokenAge > maxAge) {
-      refreshTokenStore.delete(refreshToken);
+    // 检查refresh token是否过期
+    const now = new Date();
+    const expiresAt = new Date(tokenData.expires_at);
+    if (now > expiresAt) {
+      await RefreshTokenRepository.delete(refreshToken);
       return res.status(401).json({
         success: false,
         error: 'Refresh token expired'
@@ -612,9 +614,9 @@ router.post('/refresh-token', (req: any, res: any) => {
     }
 
     // 查找用户
-    const user = users.find(u => u.id === tokenData.userId);
+    const user = await UserRepository.findById(tokenData.user_id);
     if (!user) {
-      refreshTokenStore.delete(refreshToken);
+      await RefreshTokenRepository.delete(refreshToken);
       return res.status(401).json({
         success: false,
         error: 'User not found'
@@ -630,10 +632,15 @@ router.post('/refresh-token', (req: any, res: any) => {
     const refreshTokenExpiresIn = 7 * 24 * 60 * 60; // 7天
 
     // 删除旧的refresh token，存储新的
-    refreshTokenStore.delete(refreshToken);
-    refreshTokenStore.set(newRefreshToken, {
+    await RefreshTokenRepository.delete(refreshToken);
+    const newExpiresAt = new Date(Date.now() + refreshTokenExpiresIn * 1000);
+    await RefreshTokenRepository.create(newRefreshToken, user.id, newExpiresAt);
+
+    logInfo('Token refreshed successfully', {
       userId: user.id,
-      createdAt: Date.now()
+      email: user.email,
+      ip: req.ip,
+      userAgent: req.get('User-Agent')
     });
 
     res.json({
@@ -647,10 +654,10 @@ router.post('/refresh-token', (req: any, res: any) => {
       message: 'Token refreshed successfully'
     });
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    logError('Token refresh error', error);
     res.status(500).json({
       success: false,
-      error: errorMessage
+      error: 'Internal server error'
     });
   }
 });
@@ -696,7 +703,7 @@ router.post('/refresh-token', (req: any, res: any) => {
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post('/logout', (req: any, res: any) => {
+router.post('/logout', async (req: any, res: any) => {
   try {
     // 从请求头或请求体中获取token
     const authHeader = req.headers.authorization;
@@ -714,23 +721,30 @@ router.post('/logout', (req: any, res: any) => {
 
     // 将token添加到黑名单
     if (token) {
-      tokenBlacklist.add(token);
+      await TokenBlacklistRepository.add(token);
     }
 
     // 删除refresh token
     if (refreshToken) {
-      refreshTokenStore.delete(refreshToken);
+      await RefreshTokenRepository.delete(refreshToken);
     }
+
+    logInfo('User logged out successfully', {
+      hasToken: !!token,
+      hasRefreshToken: !!refreshToken,
+      ip: req.ip,
+      userAgent: req.get('User-Agent')
+    });
 
     res.json({
       success: true,
       message: 'Logout successful'
     });
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    logError('Logout error', error);
     res.status(500).json({
       success: false,
-      error: errorMessage
+      error: 'Internal server error'
     });
   }
 });
@@ -789,7 +803,7 @@ router.post('/logout', (req: any, res: any) => {
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.delete('/delete-account', (req: any, res: any) => {
+router.delete('/delete-account', async (req: any, res: any) => {
   try {
     // 模拟从token中获取用户信息
     const token: string | undefined = req.headers.authorization?.replace('Bearer ', '');
@@ -802,7 +816,8 @@ router.delete('/delete-account', (req: any, res: any) => {
     }
 
     // 检查token是否在黑名单中
-    if (tokenBlacklist.has(token)) {
+    const isBlacklisted = await TokenBlacklistRepository.isBlacklisted(token);
+    if (isBlacklisted) {
       return res.status(401).json({
         success: false,
         error: 'Token has been revoked'
@@ -820,16 +835,15 @@ router.delete('/delete-account', (req: any, res: any) => {
     // 从token中提取用户ID (模拟)
     const tokenParts: string[] = token.split('_');
     const userId: number = parseInt(tokenParts[2], 10);
-    const userIndex: number = users.findIndex(u => u.id === userId);
+    const user: DatabaseUser | undefined = await UserRepository.findById(userId);
 
-    if (userIndex === -1) {
+    if (!user) {
       return res.status(401).json({
         success: false,
         error: 'User not found'
       });
     }
 
-    const user = users[userIndex];
     const { password, confirmText }: DeleteAccountRequest = req.body;
 
     // 验证必填字段
@@ -882,27 +896,25 @@ router.delete('/delete-account', (req: any, res: any) => {
 
     // 删除用户相关的所有数据
     // 1. 将当前token加入黑名单
-    tokenBlacklist.add(token);
+    await TokenBlacklistRepository.add(token);
 
     // 2. 删除所有相关的refresh token
-    const tokensToDelete: string[] = [];
-    refreshTokenStore.forEach((tokenData, refreshToken) => {
-      if (tokenData.userId === userId) {
-        tokensToDelete.push(refreshToken);
-      }
-    });
-    tokensToDelete.forEach(refreshToken => {
-      refreshTokenStore.delete(refreshToken);
-    });
+    await RefreshTokenRepository.deleteByUser(userId);
 
-    // 3. 从用户数组中删除用户
-    users.splice(userIndex, 1);
+    // 3. 从数据库中删除用户
+    const deletedCount = await UserRepository.delete(userId);
+
+    if (deletedCount === 0) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to delete user account'
+      });
+    }
 
     logInfo('Account deleted successfully', {
       deletedUserId: userId,
       deletedEmail: user.email,
       deletedName: user.name,
-      remainingUsersCount: users.length,
       ip: req.ip,
       userAgent: req.get('User-Agent')
     });
@@ -918,10 +930,9 @@ router.delete('/delete-account', (req: any, res: any) => {
       requestBody: JSON.stringify(req.body).replace(/"password":"[^"]*"/g, '"password":"***"')
     });
 
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     res.status(500).json({
       success: false,
-      error: errorMessage
+      error: 'Internal server error'
     });
   }
 });

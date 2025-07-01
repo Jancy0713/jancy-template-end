@@ -1,77 +1,15 @@
 import express, { Router, Request, Response } from 'express';
 import { TodoStats, Todo, TodoStatus } from '../types';
+import { TodoRepository } from '../config/database';
 
 const router: Router = express.Router();
 
-// 这里应该从todos路由中导入数据，为了演示目的，我们重新定义
-// 在实际项目中，应该使用共享的数据存储或数据库
-let todos: Todo[] = [
-  {
-    id: '1',
-    title: '完成项目文档',
-    description: '编写项目的技术文档和用户手册',
-    status: 'in-progress',
-    priority: 'high',
-    tags: ['work', 'documentation'],
-    dueDate: new Date('2025-07-01'),
-    createdAt: new Date('2025-06-20'),
-    updatedAt: new Date('2025-06-25'),
-    order: 1,
-    history: []
-  },
-  {
-    id: '2',
-    title: '学习TypeScript',
-    description: '深入学习TypeScript的高级特性',
-    status: 'pending',
-    priority: 'medium',
-    tags: ['learning', 'typescript'],
-    dueDate: new Date('2025-07-15'),
-    createdAt: new Date('2025-06-22'),
-    updatedAt: new Date('2025-06-22'),
-    order: 2,
-    history: []
-  },
-  {
-    id: '3',
-    title: '健身计划',
-    description: '制定并执行每周的健身计划',
-    status: 'completed',
-    priority: 'low',
-    tags: ['health', 'personal'],
-    completedAt: new Date('2025-06-24'),
-    createdAt: new Date('2025-06-15'),
-    updatedAt: new Date('2025-06-24'),
-    order: 3,
-    history: []
-  },
-  {
-    id: '4',
-    title: '代码重构',
-    description: '重构旧项目的代码结构',
-    status: 'completed',
-    priority: 'high',
-    tags: ['work', 'refactoring'],
-    completedAt: new Date('2025-06-23'),
-    createdAt: new Date('2025-06-18'),
-    updatedAt: new Date('2025-06-23'),
-    order: 4,
-    history: []
-  },
-  {
-    id: '5',
-    title: '学习Vue 3',
-    description: '学习Vue 3的新特性和Composition API',
-    status: 'in-progress',
-    priority: 'medium',
-    tags: ['learning', 'vue'],
-    dueDate: new Date('2025-06-20'), // 已过期
-    createdAt: new Date('2025-06-10'),
-    updatedAt: new Date('2025-06-25'),
-    order: 5,
-    history: []
-  }
-];
+// 模拟用户ID获取函数（实际项目中应该从认证中间件获取）
+function getCurrentUserId(req: any): number {
+  // 这里应该从JWT token或session中获取用户ID
+  // 为了演示，我们使用固定的用户ID
+  return 1;
+}
 
 /**
  * @swagger
@@ -94,44 +32,25 @@ let todos: Todo[] = [
  *                 data:
  *                   $ref: '#/components/schemas/TodoStats'
  */
-router.get('/', (req: any, res: any) => {
+router.get('/', async (req: any, res: any) => {
   try {
-    const now = new Date();
-    
-    // 基础统计
-    const total = todos.length;
-    const pending = todos.filter(todo => todo.status === 'pending').length;
-    const inProgress = todos.filter(todo => todo.status === 'in-progress').length;
-    const completed = todos.filter(todo => todo.status === 'completed').length;
-    
-    // 过期任务统计
-    const overdue = todos.filter(todo => 
-      todo.status !== 'completed' && 
-      todo.dueDate && 
-      new Date(todo.dueDate) < now
-    ).length;
-    
-    // 标签统计
-    const tagCounts: { [key: string]: number } = {};
-    todos.forEach(todo => {
-      todo.tags.forEach(tag => {
-        tagCounts[tag] = (tagCounts[tag] || 0) + 1;
-      });
-    });
-    
-    const tagStats = Object.entries(tagCounts)
-      .map(([tag, count]) => ({ tag, count }))
-      .sort((a, b) => b.count - a.count);
-    
+    const userId = getCurrentUserId(req);
+
+    // 获取基础统计
+    const basicStats = await TodoRepository.getStats(userId);
+
+    // 获取标签统计
+    const tagStats = await TodoRepository.getTagStats(userId);
+
     const stats: TodoStats = {
-      total,
-      pending,
-      inProgress,
-      completed,
-      overdue,
+      total: basicStats.total,
+      pending: basicStats.pending,
+      inProgress: basicStats.inProgress,
+      completed: basicStats.completed,
+      overdue: basicStats.overdue,
       tagStats
     };
-    
+
     res.json({
       success: true,
       data: stats
@@ -200,31 +119,44 @@ router.get('/', (req: any, res: any) => {
  *                         completed:
  *                           type: integer
  */
-router.get('/priority', (req: any, res: any) => {
+router.get('/priority', async (req: any, res: any) => {
   try {
+    const userId = getCurrentUserId(req);
+    const { db } = require('../config/database');
+
+    // 使用数据库查询获取优先级统计
+    const result = await db('todos')
+      .where('user_id', userId)
+      .select('priority', 'status', db.raw('COUNT(*) as count'))
+      .groupBy('priority', 'status');
+
     const priorityStats = {
       high: { total: 0, pending: 0, inProgress: 0, completed: 0 },
       medium: { total: 0, pending: 0, inProgress: 0, completed: 0 },
       low: { total: 0, pending: 0, inProgress: 0, completed: 0 }
     };
-    
-    todos.forEach(todo => {
-      const priority = todo.priority;
-      priorityStats[priority].total++;
-      
-      switch (todo.status) {
+
+    // 处理查询结果
+    result.forEach((row: any) => {
+      const priority = row.priority as 'high' | 'medium' | 'low';
+      const status = row.status;
+      const count = parseInt(row.count) || 0;
+
+      priorityStats[priority].total += count;
+
+      switch (status) {
         case 'pending':
-          priorityStats[priority].pending++;
+          priorityStats[priority].pending = count;
           break;
         case 'in-progress':
-          priorityStats[priority].inProgress++;
+          priorityStats[priority].inProgress = count;
           break;
         case 'completed':
-          priorityStats[priority].completed++;
+          priorityStats[priority].completed = count;
           break;
       }
     });
-    
+
     res.json({
       success: true,
       data: priorityStats
@@ -276,9 +208,11 @@ router.get('/priority', (req: any, res: any) => {
  *                       completed:
  *                         type: integer
  */
-router.get('/timeline', (req: any, res: any) => {
+router.get('/timeline', async (req: any, res: any) => {
   try {
+    const userId = getCurrentUserId(req);
     const days = parseInt(req.query.days) || 7;
+    const { db } = require('../config/database');
     const now = new Date();
     const timeline = [];
 
@@ -290,21 +224,30 @@ router.get('/timeline', (req: any, res: any) => {
       const nextDate = new Date(date);
       nextDate.setDate(nextDate.getDate() + 1);
 
-      const created = todos.filter(todo => {
-        const createdDate = new Date(todo.createdAt);
-        return createdDate >= date && createdDate < nextDate;
-      }).length;
+      const dateStr = date.toISOString();
+      const nextDateStr = nextDate.toISOString();
 
-      const completed = todos.filter(todo => {
-        if (!todo.completedAt) return false;
-        const completedDate = new Date(todo.completedAt);
-        return completedDate >= date && completedDate < nextDate;
-      }).length;
+      // 查询当天创建的任务数量
+      const createdResult = await db('todos')
+        .where('user_id', userId)
+        .where('created_at', '>=', dateStr)
+        .where('created_at', '<', nextDateStr)
+        .count('* as count')
+        .first();
+
+      // 查询当天完成的任务数量
+      const completedResult = await db('todos')
+        .where('user_id', userId)
+        .where('completed_at', '>=', dateStr)
+        .where('completed_at', '<', nextDateStr)
+        .whereNotNull('completed_at')
+        .count('* as count')
+        .first();
 
       timeline.push({
         date: date.toISOString().split('T')[0],
-        created,
-        completed
+        created: parseInt(createdResult?.count as string) || 0,
+        completed: parseInt(completedResult?.count as string) || 0
       });
     }
 
@@ -358,38 +301,71 @@ router.get('/timeline', (req: any, res: any) => {
  *                       type: number
  *                       description: 平均完成时间（小时）
  */
-router.get('/completion-rate', (req: any, res: any) => {
+router.get('/completion-rate', async (req: any, res: any) => {
   try {
+    const userId = getCurrentUserId(req);
+    const { db } = require('../config/database');
     const now = new Date();
     const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
     // 总体完成率
-    const totalTodos = todos.length;
-    const completedTodos = todos.filter(todo => todo.status === 'completed').length;
+    const totalResult = await db('todos')
+      .where('user_id', userId)
+      .select(
+        db.raw('COUNT(*) as total'),
+        db.raw("COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed")
+      )
+      .first();
+
+    const totalTodos = parseInt(totalResult?.total) || 0;
+    const completedTodos = parseInt(totalResult?.completed) || 0;
     const overall = totalTodos > 0 ? (completedTodos / totalTodos) * 100 : 0;
 
     // 本周完成率
-    const thisWeekTodos = todos.filter(todo => new Date(todo.createdAt) >= weekAgo);
-    const thisWeekCompleted = thisWeekTodos.filter(todo => todo.status === 'completed').length;
-    const thisWeek = thisWeekTodos.length > 0 ? (thisWeekCompleted / thisWeekTodos.length) * 100 : 0;
+    const weekResult = await db('todos')
+      .where('user_id', userId)
+      .where('created_at', '>=', weekAgo.toISOString())
+      .select(
+        db.raw('COUNT(*) as total'),
+        db.raw("COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed")
+      )
+      .first();
+
+    const thisWeekTotal = parseInt(weekResult?.total) || 0;
+    const thisWeekCompleted = parseInt(weekResult?.completed) || 0;
+    const thisWeek = thisWeekTotal > 0 ? (thisWeekCompleted / thisWeekTotal) * 100 : 0;
 
     // 本月完成率
-    const thisMonthTodos = todos.filter(todo => new Date(todo.createdAt) >= monthAgo);
-    const thisMonthCompleted = thisMonthTodos.filter(todo => todo.status === 'completed').length;
-    const thisMonth = thisMonthTodos.length > 0 ? (thisMonthCompleted / thisMonthTodos.length) * 100 : 0;
+    const monthResult = await db('todos')
+      .where('user_id', userId)
+      .where('created_at', '>=', monthAgo.toISOString())
+      .select(
+        db.raw('COUNT(*) as total'),
+        db.raw("COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed")
+      )
+      .first();
+
+    const thisMonthTotal = parseInt(monthResult?.total) || 0;
+    const thisMonthCompleted = parseInt(monthResult?.completed) || 0;
+    const thisMonth = thisMonthTotal > 0 ? (thisMonthCompleted / thisMonthTotal) * 100 : 0;
 
     // 平均完成时间
-    const completedWithTime = todos.filter(todo => todo.completedAt && todo.createdAt);
-    const totalCompletionTime = completedWithTime.reduce((sum, todo) => {
-      const created = new Date(todo.createdAt).getTime();
-      const completed = new Date(todo.completedAt!).getTime();
-      return sum + (completed - created);
-    }, 0);
+    const completionTimeResult = await db('todos')
+      .where('user_id', userId)
+      .whereNotNull('completed_at')
+      .select('created_at', 'completed_at');
 
-    const averageCompletionTime = completedWithTime.length > 0
-      ? totalCompletionTime / completedWithTime.length / (1000 * 60 * 60) // 转换为小时
-      : 0;
+    let averageCompletionTime = 0;
+    if (completionTimeResult.length > 0) {
+      const totalCompletionTime = completionTimeResult.reduce((sum: number, todo: any) => {
+        const created = new Date(todo.created_at).getTime();
+        const completed = new Date(todo.completed_at).getTime();
+        return sum + (completed - created);
+      }, 0);
+
+      averageCompletionTime = totalCompletionTime / completionTimeResult.length / (1000 * 60 * 60); // 转换为小时
+    }
 
     res.json({
       success: true,
